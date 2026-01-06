@@ -7,6 +7,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
@@ -22,6 +23,8 @@
     };
     firebase.initializeApp(firebaseConfig);
     const db = firebase.firestore();
+    const auth = firebase.auth();
+let currentUser = null;
 let state = {
       pcs: [],
       searchTerm: '',
@@ -180,6 +183,78 @@ let state = {
       reader.readAsText(file);
       event.target.value = '';
     }
+    function render() {
+  const app = document.getElementById('app');
+  
+  if (!currentUser) {
+    app.innerHTML = renderLoginView();
+    return;
+  }
+  
+  if (state.activeView === 'home') {
+    app.innerHTML = `
+      <div class="bg-white border-b border-gray-200 px-6 py-3">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+          <div class="text-sm text-gray-600">Signed in as: <span class="font-medium">${currentUser.email}</span></div>
+          <button onclick="handleLogout()" class="text-sm text-red-600 hover:text-red-700 font-medium">Sign Out</button>
+        </div>
+      </div>
+      ${renderHomeView()}
+    `;
+  } else if (state.activeView === 'add') {
+    app.innerHTML = `
+      <div class="bg-white border-b border-gray-200 px-6 py-3">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+          <div class="text-sm text-gray-600">Signed in as: <span class="font-medium">${currentUser.email}</span></div>
+          <button onclick="handleLogout()" class="text-sm text-red-600 hover:text-red-700 font-medium">Sign Out</button>
+        </div>
+      </div>
+      ${renderAddView()}
+    `;
+    attachFormListeners();
+  } else if (state.activeView === 'search') {
+    app.innerHTML = `
+      <div class="bg-white border-b border-gray-200 px-6 py-3">
+        <div class="max-w-7xl mx-auto flex justify-between items-center">
+          <div class="text-sm text-gray-600">Signed in as: <span class="font-medium">${currentUser.email}</span></div>
+          <button onclick="handleLogout()" class="text-sm text-red-600 hover:text-red-700 font-medium">Sign Out</button>
+        </div>
+      </div>
+      ${renderSearchView()}
+    `;
+  }
+  
+  lucide.createIcons();
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  const email = document.getElementById('loginEmail').value;
+  const password = document.getElementById('loginPassword').value;
+  const errorDiv = document.getElementById('authError');
+  
+  try {
+    await auth.signInWithEmailAndPassword(email, password);
+  } catch (error) {
+    errorDiv.textContent = 'Invalid email or password';
+    errorDiv.classList.remove('hidden');
+  }
+}
+
+async function handleLogout() {
+  try {
+    await auth.signOut();
+  } catch (error) {
+    console.error('Logout error:', error);
+  }
+}
+
+function checkAuth() {
+  auth.onAuthStateChanged((user) => {
+    currentUser = user;
+    render();
+  });
+}
 function renderHomeView() {
       const stats = getStats();
       return `
@@ -493,7 +568,27 @@ function render() {
       render();
     };
 
-    loadData();
+window.handleLogin = handleLogin;
+```
+
+---
+
+## Step 7: Secure Firestore Rules
+
+Now that we have authentication, secure your database:
+
+1. Go to Firebase Console → **Firestore Database** → **Rules**
+2. **Replace with:**
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /pcs/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}    
+checkAuth();
   </script>
 </body>
 </html>
