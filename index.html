@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PC Warranty Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyCNHIlUl9YK9TZpqQZd3OyUbsQSl86mwH0",
+      authDomain: "pc-warranty-tracker.firebaseapp.com",
+      projectId: "pc-warranty-tracker",
+      storageBucket: "pc-warranty-tracker.firebasestorage.app",
+      messagingSenderId: "962785576242",
+      appId: "1:962785576242:web:9ac8cec13cbc719b49832b"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    const auth = firebase.auth();
+    let currentUser = null;
+let state = {
+      pcs: [],
+      searchTerm: '',
+      filterTeam: '',
+      filterStatus: 'all',
+      currentPage: 1,
+      activeView: 'home',
+      editingId: null,
+      deleteConfirm: null,
+      itemsPerPage: 10,
+      formData: {
+        customerName: '',
+        customerTeam: '',
+        pcSerial: '',
+        pcModel: '',
+        purchaseDate: '',
+        warrantyYears: '3'
+      }
+    };
+
+    function calculateWarrantyInfo(purchaseDate, warrantyYears) {
+      const purchase = new Date(purchaseDate);
+      const expiration = new Date(purchase);
+      expiration.setFullYear(expiration.getFullYear() + parseInt(warrantyYears));
+      const today = new Date();
+      const daysRemaining = Math.ceil((expiration - today) / (1000 * 60 * 60 * 24));
+      let status = 'good';
+      if (daysRemaining < 0) status = 'expired';
+      else if (daysRemaining <= 90) status = 'warning';
+      return { expiration, daysRemaining, status };
+    }
+
+    function getFilteredAndSortedPCs() {
+      return state.pcs
+        .filter(pc => 
+          pc.customerName.toLowerCase().includes(state.searchTerm.toLowerCase()) ||
+          (pc.customerTeam && pc.customerTeam.toLowerCase().includes(state.searchTerm.toLowerCase())) ||
+          pc.pcSerial.toLowerCase().includes(state.searchTerm.toLowerCase()) ||
+          pc.pcModel.toLowerCase().includes(state.searchTerm.toLowerCase())
+        )
+        .filter(pc => state.filterTeam === '' || pc.customerTeam === state.filterTeam)
+        .map(pc => ({ ...pc, ...calculateWarrantyInfo(pc.purchaseDate, pc.warrantyYears) }))
+        .filter(pc => state.filterStatus === 'all' || pc.status === state.filterStatus)
+        .sort((a, b) => {
+          const order = { expired: 0, warning: 1, good: 2 };
+          return order[a.status] - order[b.status] || a.daysRemaining - b.daysRemaining;
+        });
+    }
+
+    function getStats() {
+      const enrichedPCs = state.pcs.map(pc => ({ ...pc, ...calculateWarrantyInfo(pc.purchaseDate, pc.warrantyYears) }));
+      return {
+        total: state.pcs.length,
+        expired: enrichedPCs.filter(pc => pc.status === 'expired').length,
+        warning: enrichedPCs.filter(pc => pc.status === 'warning').length,
+        good: enrichedPCs.filter(pc => pc.status === 'good').length
+      };
+    }
+
+function debounce(func, wait) {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+}
+
+    async function loadData() {
+      try {
+        const snapshot = await db.collection('pcs').get();
+        state.pcs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        render();
+      } catch (error) {
+        console.error('Error loading data:', error);
+      }
+    }
+
+    async function savePC() {
+      const { customerName, pcSerial, pcModel, purchaseDate } = state.formData;
+      if (!customerName || !pcSerial || !pcModel || !purchaseDate) {
+        alert('Please fill in all required fields');
+        return;
+      }
+      try {
+        if (state.editingId) {
+          await db.collection('pcs').doc(state.editingId).update(state.formData);
+          state.editingId = null;
+        } else {
+          await db.collection('pcs').add(state.formData);
+        }
+        state.formData = { customerName: '', customerTeam: '', pcSerial: '', pcModel: '', purchaseDate: '', warrantyYears: '3' };
+        state.activeView = 'home';
+        await loadData();
+      } catch (error) {
+        console.error('Error saving:', error);
+        alert('Error saving data');
+      }
+    }
+
+    async function deletePC(id) {
+      try {
+        await db.collection('pcs').doc(id).delete();
+        state.deleteConfirm = null;
+        await loadData();
+      } catch (error) {
+        console.error('Error deleting:', error);
+        alert('Error deleting record');
+      }
+    }
+
+    function editPC(pc) {
+      state.formData = {
+        customerName: pc.customerName,
+        customerTeam: pc.customerTeam,
+        pcSerial: pc.pcSerial,
+        pcModel: pc.pcModel,
+        purchaseDate: pc.purchaseDate,
+        warrantyYears: pc.warrantyYears
+      };
+      state.editingId = pc.id;
+      state.activeView = 'add';
+      render();
+    }
+
+    function exportData() {
+      if (state.pcs.length === 0) {
+        alert('No data to export');
+        return;
+      }
+      const dataStr = JSON.stringify(state.pcs, null, 2);
+      const blob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `pc-warranty-backup-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    function importData(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const imported = JSON.parse(e.target.result);
+          if (Array.isArray(imported)) {
+            const batch = db.batch();
+            imported.forEach(item => {
+              const docRef = db.collection('pcs').doc();
+              const { id, ...data } = item;
+              batch.set(docRef, data);
+            });
+            await batch.commit();
+            await loadData();
+            alert(`Successfully imported ${imported.length} records!`);
+          }
+        } catch (error) {
+          alert('Error importing file');
+        }
+      };
+      reader.readAsText(file);
+      event.target.value = '';
+    }
+function renderLoginView() {
+      return `
+        <div class="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 flex items-center justify-center p-6">
+          <div class="bg-white p-8 rounded-lg shadow-lg max-w-md w-full">
+            <h2 class="text-3xl font-bold text-gray-900 mb-2">PC Warranty Tracker</h2>
+            <p class="text-gray-600 mb-6">Sign in to access the system</p>
+            
+            <div id="authError" class="hidden bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4"></div>
+            
+            <form onsubmit="handleLogin(event)">
+              <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                <input type="email" id="loginEmail" placeholder="your-email@example.com" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+              </div>
+              
+              <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                <input type="password" id="loginPassword" placeholder="Enter your password" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+              </div>
+              
+              <button type="submit" class="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition font-medium">
+                Sign In
+              </button>
+            </form>
+          </div>
+        </div>
+      `;
+    }
+
+    async function handleLogin(event) {
+      event.preventDefault();
+      const email = document.getElementById('loginEmail').value;
+      const password = document.getElementById('loginPassword').value;
+      const errorDiv = document.getElementById('authError');
+      
+      try {
+        await auth.signInWithEmailAndPassword(email, password);
+      } catch (error) {
+        errorDiv.textContent = 'Invalid email or password';
+        errorDiv.classList.remove('hidden');
+      }
+    }
+
+    async function handleLogout() {
+      try {
+        await auth.signOut();
+      } catch (error) {
+        console.error('Logout error:', error);
+      }
+    }
+
+    function checkAuth() {
+      auth.onAuthStateChanged((user) => {
+        currentUser = user;
+        if (user) {
+          loadData();
+        } else {
+          render();
+        }
+      });
+    }
+
+    function renderHomeView() {
+      const stats = getStats();
+      return `
+        <div class="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 p-6">
+          <div class="max-w-6xl mx-auto">
+            <div class="text-center mb-12">
+              <h1 class="text-4xl font-bold text-gray-900 mb-2">Executive Support PC Warranty Tracker</h1>
+              <p class="text-gray-600">Manage and monitor warranty information for all PCs</p>
+            </div>
+            <div class="grid grid-cols-4 gap-4 mb-12">
+              <button onclick="setFilterAndView('all', 'search')" class="p-6 bg-white rounded-xl shadow-sm border border-gray-200 hover:shadow-lg hover:border-blue-300 transition-all">
+                <div class="text-3xl font-bold text-gray-900">${stats.total}</div>
+                <div class="text-sm text-gray-600">Total PCs</div>
+              </button>
+              <button onclick="setFilterAndView('good', 'search')" class="p-6 bg-green-50 rounded-xl shadow-sm border border-green-200 hover:shadow-lg hover:border-green-400 transition-all">
+                <div class="text-3xl font-bold text-green-700">${stats.good}</div>
+                <div class="text-sm text-green-600">Good (>90 days)</div>
+              </button>
+              <button onclick="setFilterAndView('warning', 'search')" class="p-6 bg-yellow-50 rounded-xl shadow-sm border border-yellow-200 hover:shadow-lg hover:border-yellow-400 transition-all">
+                <div class="text-3xl font-bold text-yellow-700">${stats.warning}</div>
+                <div class="text-sm text-yellow-600">Warning (≤90 days)</div>
+              </button>
+              <button onclick="setFilterAndView('expired', 'search')" class="p-6 bg-red-50 rounded-xl shadow-sm border border-red-200 hover:shadow-lg hover:border-red-400 transition-all">
+                <div class="text-3xl font-bold text-red-700">${stats.expired}</div>
+                <div class="text-sm text-red-600">Expired</div>
+              </button>
+            </div>
+            <div class="grid grid-cols-2 gap-6 mb-8">
+              <button onclick="setView('add')" class="group bg-white rounded-xl shadow-md border-2 border-gray-200 p-8 hover:border-blue-500 hover:shadow-xl transition-all">
+                <div class="flex flex-col items-center gap-4">
+                  <div class="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center group-hover:bg-blue-600 transition-colors">
+                    <i data-lucide="plus" class="text-blue-600 group-hover:text-white"></i>
+                  </div>
+                  <h2 class="text-2xl font-bold text-gray-900 group-hover:text-blue-600 transition-colors">Add New Record</h2>
+                  <p class="text-gray-600 text-center">Register a new PC and its warranty information</p>
+                </div>
+              </button>
+              <button onclick="setView('search')" class="group bg-white rounded-xl shadow-md border-2 border-gray-200 p-8 hover:border-green-500 hover:shadow-xl transition-all">
+                <div class="flex flex-col items-center gap-4">
+                  <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center group-hover:bg-green-600 transition-colors">
+                    <i data-lucide="search" class="text-green-600 group-hover:text-white"></i>
+                  </div>
+                  <h2 class="text-2xl font-bold text-gray-900 group-hover:text-green-600 transition-colors">Search & Manage</h2>
+                  <p class="text-gray-600 text-center">Find, edit, and manage existing PC records</p>
+                </div>
+              </button>
+            </div>
+            <div class="flex justify-center gap-4">
+              <button onclick="exportData()" class="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition flex items-center gap-2 shadow-md">
+                <i data-lucide="download"></i> Export Data
+              </button>
+              <label class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition flex items-center gap-2 cursor-pointer shadow-md">
+                <i data-lucide="upload"></i> Import Data
+                <input type="file" accept=".json" onchange="importData(event)" class="hidden">
+              </label>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderAddView() {
+      return `
+        <div class="min-h-screen bg-gray-50 p-6">
+          <div class="max-w-5xl mx-auto">
+            <button onclick="cancelEdit()" class="flex items-center gap-2 text-gray-600 hover:text-gray-900 mb-6">
+              <i data-lucide="arrow-left"></i> Back to Home
+            </button>
+            <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-8">
+              <h2 class="text-2xl font-bold mb-6">${state.editingId ? 'Edit Record' : 'Add New Record'}</h2>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-2">Customer Name *</label>
+                  <input type="text" id="customerName" placeholder="Enter customer name" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" value="${state.formData.customerName}">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-2">Customer Team</label>
+                  <select id="customerTeam" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">Select Team</option>
+                    <option value="1888 Mgmt." ${state.formData.customerTeam === '1888 Mgmt.' ? 'selected' : ''}>1888 Mgmt.</option>
+                    <option value="CCKFO" ${state.formData.customerTeam === 'CCKFO' ? 'selected' : ''}>CCKFO</option>
+                    <option value="Executive Assistants" ${state.formData.customerTeam === 'Executive Assistants' ? 'selected' : ''}>Executive Assistants</option>
+                    <option value="Executive Protection" ${state.formData.customerTeam === 'Executive Protection' ? 'selected' : ''}>Executive Protection</option>
+                    <option value="Executive Support" ${state.formData.customerTeam === 'Executive Support' ? 'selected' : ''}>Executive Support</option>
+                    <option value="Executives" ${state.formData.customerTeam === 'Executives' ? 'selected' : ''}>Executives</option>
+                    <option value="KDT" ${state.formData.customerTeam === 'KDT' ? 'selected' : ''}>KDT</option>
+                    <option value="Koch Aviation" ${state.formData.customerTeam === 'Koch Aviation' ? 'selected' : ''}>Koch Aviation</option>
+                    <option value="Matador Security" ${state.formData.customerTeam === 'Matador Security' ? 'selected' : ''}>Matador Security</option>
+                    <option value="Other" ${state.formData.customerTeam === 'Other' ? 'selected' : ''}>Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-2">PC Serial Number *</label>
+                  <input type="text" id="pcSerial" placeholder="Enter serial number" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" value="${state.formData.pcSerial}">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-2">PC Model *</label>
+                  <input type="text" id="pcModel" placeholder="Enter PC model" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" value="${state.formData.pcModel}">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-2">Warranty Start Date *</label>
+                  <input type="date" id="purchaseDate" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" value="${state.formData.purchaseDate}">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-2">Warranty Lifespan</label>
+                  <select id="warrantyYears" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="1" ${state.formData.warrantyYears === '1' ? 'selected' : ''}>1 Year</option>
+                    <option value="2" ${state.formData.warrantyYears === '2' ? 'selected' : ''}>2 Years</option>
+                    <option value="3" ${state.formData.warrantyYears === '3' ? 'selected' : ''}>3 Years</option>
+                    <option value="4" ${state.formData.warrantyYears === '4' ? 'selected' : ''}>4 Years</option>
+                    <option value="5" ${state.formData.warrantyYears === '5' ? 'selected' : ''}>5 Years</option>
+                  </select>
+                </div>
+              </div>
+              <div class="mt-8 flex gap-3">
+                <button onclick="submitForm()" class="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 transition flex items-center gap-2">
+                  <i data-lucide="plus"></i> ${state.editingId ? 'Update Record' : 'Add Record'}
+                </button>
+                ${state.editingId ? '<button onclick="cancelEdit()" class="px-6 py-3 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300">Cancel</button>' : ''}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+function renderSearchView() {
+      const stats = getStats();
+      const filtered = getFilteredAndSortedPCs();
+      const totalPages = Math.ceil(filtered.length / state.itemsPerPage);
+      const startIndex = (state.currentPage - 1) * state.itemsPerPage;
+      const currentPagePCs = filtered.slice(startIndex, startIndex + state.itemsPerPage);
+      return `
+        <div class="min-h-screen bg-gray-50 p-6">
+          ${state.deleteConfirm ? `
+            <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div class="bg-white rounded-lg p-6 max-w-md shadow-xl">
+                <h3 class="text-lg font-semibold mb-2">Confirm Delete</h3>
+                <p class="text-gray-600 mb-6">Are you sure you want to delete this PC record?</p>
+                <div class="flex gap-3 justify-end">
+                  <button onclick="state.deleteConfirm = null; render();" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300">Cancel</button>
+                  <button onclick="deletePC('${state.deleteConfirm}')" class="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">Delete</button>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+          <div class="max-w-7xl mx-auto">
+            <button onclick="setView('home')" class="flex items-center gap-2 text-gray-600 hover:text-gray-900 mb-6">
+              <i data-lucide="arrow-left"></i> Back to Home
+            </button>
+            <h1 class="text-3xl font-bold text-gray-900 mb-6">Search & Manage Records</h1>
+            <div class="grid grid-cols-4 gap-4 mb-6">
+              <button onclick="setFilter('all')" class="p-4 rounded-lg shadow-sm border transition-all ${state.filterStatus === 'all' ? 'bg-blue-50 border-blue-300 ring-2 ring-blue-500' : 'bg-white border-gray-200'}">
+                <div class="text-2xl font-bold">${stats.total}</div>
+                <div class="text-sm text-gray-600">Total PCs</div>
+              </button>
+              <button onclick="setFilter('good')" class="p-4 rounded-lg shadow-sm border transition-all ${state.filterStatus === 'good' ? 'bg-green-100 border-green-300 ring-2 ring-green-500' : 'bg-green-50 border-green-200'}">
+                <div class="text-2xl font-bold text-green-700">${stats.good}</div>
+                <div class="text-sm text-green-600">Good</div>
+              </button>
+              <button onclick="setFilter('warning')" class="p-4 rounded-lg shadow-sm border transition-all ${state.filterStatus === 'warning' ? 'bg-yellow-100 border-yellow-300 ring-2 ring-yellow-500' : 'bg-yellow-50 border-yellow-200'}">
+                <div class="text-2xl font-bold text-yellow-700">${stats.warning}</div>
+                <div class="text-sm text-yellow-600">Warning</div>
+              </button>
+              <button onclick="setFilter('expired')" class="p-4 rounded-lg shadow-sm border transition-all ${state.filterStatus === 'expired' ? 'bg-red-100 border-red-300 ring-2 ring-red-500' : 'bg-red-50 border-red-200'}">
+                <div class="text-2xl font-bold text-red-700">${stats.expired}</div>
+                <div class="text-sm text-red-600">Expired</div>
+              </button>
+            </div>
+            <div class="mb-6 grid grid-cols-2 gap-4">
+              <div class="relative">
+                <div class="absolute left-3 top-1/2 -translate-y-1/2"><i data-lucide="search" class="text-gray-400"></i></div>
+                <input type="text" id="searchInput" placeholder="Search..." class="w-full pl-10 pr-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500" value="${state.searchTerm}">
+              </div>
+              <select class="px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500" onchange="updateTeamFilter(this.value)">
+                <option value="">All Teams</option>
+                <option value="1888 Mgmt." ${state.filterTeam === '1888 Mgmt.' ? 'selected' : ''}>1888 Mgmt.</option>
+                <option value="CCKFO" ${state.filterTeam === 'CCKFO' ? 'selected' : ''}>CCKFO</option>
+                <option value="Executive Assistants" ${state.filterTeam === 'Executive Assistants' ? 'selected' : ''}>Executive Assistants</option>
+                <option value="Executive Protection" ${state.filterTeam === 'Executive Protection' ? 'selected' : ''}>Executive Protection</option>
+                <option value="Executive Support" ${state.filterTeam === 'Executive Support' ? 'selected' : ''}>Executive Support</option>
+                <option value="Executives" ${state.filterTeam === 'Executives' ? 'selected' : ''}>Executives</option>
+                <option value="KDT" ${state.filterTeam === 'KDT' ? 'selected' : ''}>KDT</option>
+                <option value="Koch Aviation" ${state.filterTeam === 'Koch Aviation' ? 'selected' : ''}>Koch Aviation</option>
+                <option value="Matador Security" ${state.filterTeam === 'Matador Security' ? 'selected' : ''}>Matador Security</option>
+                <option value="Other" ${state.filterTeam === 'Other' ? 'selected' : ''}>Other</option>
+              </select>
+            </div>
+            <div class="bg-white rounded-lg shadow-sm border overflow-hidden">
+              ${filtered.length === 0 ? '<div class="p-12 text-center text-gray-500">No PCs found</div>' : `
+                <table class="w-full">
+                  <thead class="bg-gray-50 border-b">
+                    <tr>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Status</th>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Customer</th>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Team</th>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Serial</th>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Model</th>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Start</th>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Expiration</th>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Days Left</th>
+                      <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y">
+                    ${currentPagePCs.map(pc => `
+                      <tr class="${pc.status === 'expired' ? 'bg-red-50' : pc.status === 'warning' ? 'bg-yellow-50' : 'bg-white'}">
+                        <td class="px-4 py-3"><i data-lucide="${pc.status === 'expired' ? 'x-circle' : pc.status === 'warning' ? 'alert-triangle' : 'check-circle'}" class="${pc.status === 'expired' ? 'text-red-500' : pc.status === 'warning' ? 'text-yellow-500' : 'text-green-500'}"></i></td>
+                        <td class="px-4 py-3 font-semibold">${pc.customerName}</td>
+                        <td class="px-4 py-3">${pc.customerTeam || '-'}</td>
+                        <td class="px-4 py-3 font-medium">${pc.pcSerial}</td>
+                        <td class="px-4 py-3">${pc.pcModel}</td>
+                        <td class="px-4 py-3">${new Date(pc.purchaseDate).toLocaleDateString()}</td>
+                        <td class="px-4 py-3">${pc.expiration.toLocaleDateString()}</td>
+                        <td class="px-4 py-3"><span class="font-bold ${pc.status === 'expired' ? 'text-red-700' : pc.status === 'warning' ? 'text-yellow-700' : 'text-green-700'}">${pc.daysRemaining < 0 ? `Expired ${Math.abs(pc.daysRemaining)}d ago` : `${pc.daysRemaining} days`}</span></td>
+                        <td class="px-4 py-3">
+                          <div class="flex gap-2">
+                            <button onclick='editPC(${JSON.stringify(pc).replace(/'/g, "&#39;")})' class="p-2 text-blue-600 hover:bg-blue-100 rounded"><i data-lucide="edit-2" class="w-4 h-4"></i></button>
+                            <button onclick="confirmDelete('${pc.id}')" class="p-2 text-red-600 hover:bg-red-100 rounded"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                          </div>
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+                ${totalPages > 1 ? `
+                  <div class="px-6 py-4 border-t flex items-center justify-between">
+                    <div class="text-sm text-gray-700">Showing <span class="font-medium">${startIndex + 1}</span> to <span class="font-medium">${Math.min(startIndex + state.itemsPerPage, filtered.length)}</span> of <span class="font-medium">${filtered.length}</span> results</div>
+                    <div class="flex gap-2">
+                      <button onclick="changePage(${state.currentPage - 1})" ${state.currentPage === 1 ? 'disabled' : ''} class="px-3 py-2 rounded-lg border transition flex items-center ${state.currentPage === 1 ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white text-gray-700 hover:bg-gray-50'}"><i data-lucide="chevron-left"></i></button>
+                      ${Array.from({length: Math.min(5, totalPages)}, (_, i) => `<button onclick="changePage(${i + 1})" class="px-3 py-2 rounded-lg border transition ${state.currentPage === i + 1 ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}">${i + 1}</button>`).join('')}
+                      <button onclick="changePage(${state.currentPage + 1})" ${state.currentPage === totalPages ? 'disabled' : ''} class="px-3 py-2 rounded-lg border transition flex items-center ${state.currentPage === totalPages ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white text-gray-700 hover:bg-gray-50'}"><i data-lucide="chevron-right"></i></button>
+                    </div>
+                  </div>
+                ` : ''}
+              `}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function updateTableOnly() {
+      const filtered = getFilteredAndSortedPCs();
+      const totalPages = Math.ceil(filtered.length / state.itemsPerPage);
+      const startIndex = (state.currentPage - 1) * state.itemsPerPage;
+      const currentPagePCs = filtered.slice(startIndex, startIndex + state.itemsPerPage);
+      
+      const tableContainer = document.querySelector('.bg-white.rounded-lg.shadow-sm.border.overflow-hidden');
+      if (!tableContainer) return;
+      
+      tableContainer.innerHTML = filtered.length === 0 ? '<div class="p-12 text-center text-gray-500">No PCs found</div>' : `
+        <table class="w-full">
+          <thead class="bg-gray-50 border-b">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Status</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Customer</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Team</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Serial</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Model</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Start</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Expiration</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Days Left</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y">
+            ${currentPagePCs.map(pc => `
+              <tr class="${pc.status === 'expired' ? 'bg-red-50' : pc.status === 'warning' ? 'bg-yellow-50' : 'bg-white'}">
+                <td class="px-4 py-3"><i data-lucide="${pc.status === 'expired' ? 'x-circle' : pc.status === 'warning' ? 'alert-triangle' : 'check-circle'}" class="${pc.status === 'expired' ? 'text-red-500' : pc.status === 'warning' ? 'text-yellow-500' : 'text-green-500'}"></i></td>
+                <td class="px-4 py-3 font-semibold">${pc.customerName}</td>
+                <td class="px-4 py-3">${pc.customerTeam || '-'}</td>
+                <td class="px-4 py-3 font-medium">${pc.pcSerial}</td>
+                <td class="px-4 py-3">${pc.pcModel}</td>
+                <td class="px-4 py-3">${new Date(pc.purchaseDate).toLocaleDateString()}</td>
+                <td class="px-4 py-3">${pc.expiration.toLocaleDateString()}</td>
+                <td class="px-4 py-3"><span class="font-bold ${pc.status === 'expired' ? 'text-red-700' : pc.status === 'warning' ? 'text-yellow-700' : 'text-green-700'}">${pc.daysRemaining < 0 ? `Expired ${Math.abs(pc.daysRemaining)}d ago` : `${pc.daysRemaining} days`}</span></td>
+                <td class="px-4 py-3">
+                  <div class="flex gap-2">
+                    <button onclick='editPC(${JSON.stringify(pc).replace(/'/g, "&#39;")})' class="p-2 text-blue-600 hover:bg-blue-100 rounded"><i data-lucide="edit-2" class="w-4 h-4"></i></button>
+                    <button onclick="confirmDelete('${pc.id}')" class="p-2 text-red-600 hover:bg-red-100 rounded"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                  </div>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        ${totalPages > 1 ? `
+          <div class="px-6 py-4 border-t flex items-center justify-between">
+            <div class="text-sm text-gray-700">Showing <span class="font-medium">${startIndex + 1}</span> to <span class="font-medium">${Math.min(startIndex + state.itemsPerPage, filtered.length)}</span> of <span class="font-medium">${filtered.length}</span> results</div>
+            <div class="flex gap-2">
+              <button onclick="changePage(${state.currentPage - 1})" ${state.currentPage === 1 ? 'disabled' : ''} class="px-3 py-2 rounded-lg border transition flex items-center ${state.currentPage === 1 ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white text-gray-700 hover:bg-gray-50'}"><i data-lucide="chevron-left"></i></button>
+              ${Array.from({length: Math.min(5, totalPages)}, (_, i) => `<button onclick="changePage(${i + 1})" class="px-3 py-2 rounded-lg border transition ${state.currentPage === i + 1 ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}">${i + 1}</button>`).join('')}
+              <button onclick="changePage(${state.currentPage + 1})" ${state.currentPage === totalPages ? 'disabled' : ''} class="px-3 py-2 rounded-lg border transition flex items-center ${state.currentPage === totalPages ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white text-gray-700 hover:bg-gray-50'}"><i data-lucide="chevron-right"></i></button>
+            </div>
+          </div>
+        ` : ''}
+      `;
+      
+      lucide.createIcons();
+    }
+
+function render() {
+      const app = document.getElementById('app');
+      
+      if (!currentUser) {
+        app.innerHTML = renderLoginView();
+        return;
+      }
+      
+      if (state.activeView === 'home') {
+        app.innerHTML = `
+          <div class="bg-white border-b border-gray-200 px-6 py-3">
+            <div class="max-w-7xl mx-auto flex justify-between items-center">
+              <div class="text-sm text-gray-600">Signed in as: <span class="font-medium">${currentUser.email}</span></div>
+              <button onclick="handleLogout()" class="text-sm text-red-600 hover:text-red-700 font-medium">Sign Out</button>
+            </div>
+          </div>
+          ${renderHomeView()}
+        `;
+      } else if (state.activeView === 'add') {
+        app.innerHTML = `
+          <div class="bg-white border-b border-gray-200 px-6 py-3">
+            <div class="max-w-7xl mx-auto flex justify-between items-center">
+              <div class="text-sm text-gray-600">Signed in as: <span class="font-medium">${currentUser.email}</span></div>
+              <button onclick="handleLogout()" class="text-sm text-red-600 hover:text-red-700 font-medium">Sign Out</button>
+            </div>
+          </div>
+          ${renderAddView()}
+        `;
+        attachFormListeners();
+      } else if (state.activeView === 'search') {
+        app.innerHTML = `
+          <div class="bg-white border-b border-gray-200 px-6 py-3">
+            <div class="max-w-7xl mx-auto flex justify-between items-center">
+              <div class="text-sm text-gray-600">Signed in as: <span class="font-medium">${currentUser.email}</span></div>
+              <button onclick="handleLogout()" class="text-sm text-red-600 hover:text-red-700 font-medium">Sign Out</button>
+            </div>
+          </div>
+          ${renderSearchView()}
+        `;
+      }
+
+      // Attach search listener if on home view
+  const searchInput = document.getElementById('searchInput');
+  if (searchInput) {
+    const debouncedUpdate = debounce(() => {
+      updateTableOnly();
+    }, 300);
+    
+    searchInput.addEventListener('input', (e) => {
+      state.searchTerm = e.target.value;
+      state.currentPage = 1;
+      debouncedUpdate();
+    });
+  }
+  
+  lucide.createIcons();
+    }
+
+    function attachFormListeners() {
+      document.getElementById('customerName').addEventListener('input', e => state.formData.customerName = e.target.value);
+      document.getElementById('customerTeam').addEventListener('change', e => state.formData.customerTeam = e.target.value);
+      document.getElementById('pcSerial').addEventListener('input', e => state.formData.pcSerial = e.target.value);
+      document.getElementById('pcModel').addEventListener('input', e => state.formData.pcModel = e.target.value);
+      document.getElementById('purchaseDate').addEventListener('change', e => state.formData.purchaseDate = e.target.value);
+      document.getElementById('warrantyYears').addEventListener('change', e => state.formData.warrantyYears = e.target.value);
+    }
+
+    window.setView = (view) => {
+      state.activeView = view;
+      render();
+    };
+
+    window.setFilter = (status) => {
+      state.filterStatus = status;
+      state.currentPage = 1;
+      render();
+    };
+
+    window.setFilterAndView = (status, view) => {
+      state.filterStatus = status;
+      state.activeView = view;
+      state.currentPage = 1;
+      render();
+    };
+
+    window.updateSearch = (value) => {
+  state.searchTerm = value;
+  state.currentPage = 1;
+  render();
+};
+
+    window.updateTeamFilter = (value) => {
+      state.filterTeam = value;
+      state.currentPage = 1;
+      updateTableOnly();
+    };
+
+    window.changePage = (page) => {
+      state.currentPage = page;
+      updateTableOnly();
+    };
+
+    window.submitForm = () => {
+      savePC();
+    };
+
+    window.cancelEdit = () => {
+      state.editingId = null;
+      state.formData = { customerName: '', customerTeam: '', pcSerial: '', pcModel: '', purchaseDate: '', warrantyYears: '3' };
+      state.activeView = 'home';
+      render();
+    };
+
+    window.confirmDelete = (id) => {
+      state.deleteConfirm = id;
+      render();
+    };
+
+    window.handleLogin = handleLogin;
+
+    checkAuth();
+  </script>
+</body>
+</html>
